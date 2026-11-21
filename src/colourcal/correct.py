@@ -56,3 +56,47 @@ def calibration_error(measured_rgb, M, reference_rgb=None):
     corrected = measured_rgb @ M
     err = np.sqrt(((corrected - reference_rgb) ** 2).sum(axis=1))
     return {"mean": float(err.mean()), "max": float(err.max()), "per_patch": err.tolist()}
+
+
+# Acceptance limits. cv2.mcc happily "finds" a chart in a scene without one (24 near-identical
+# patches); the fit then produces a wild matrix with a huge residual. A real chart, even under
+# a colour cast or poor exposure, keeps these properties.
+MIN_SPREAD = 40.0        # range of patch brightness (0-255): white vs black patch
+MIN_CORRELATION = 0.85   # measured vs reference values, all 72 numbers
+MAX_MEAN_ERROR = 25.0    # fit residual (sRGB units) that still counts as a calibration
+MAX_MAX_ERROR = 75.0
+
+
+def validate_measurement(measured_rgb, reference_rgb=None):
+    """Is this plausibly a ColorChecker? (ok, reason).
+
+    Three checks: the patches span a real brightness range, their values
+    correlate with the reference chart, and the grey ramp (bottom row) gets
+    darker from left to right.
+    """
+    if reference_rgb is None:
+        reference_rgb = COLORCHECKER_SRGB
+    m = np.asarray(measured_rgb, dtype=np.float64)
+    if m.shape != reference_rgb.shape:
+        return False, f"expected {reference_rgb.shape[0]} patches, got {m.shape[0]}"
+    lum = m.mean(axis=1)
+    spread = float(np.ptp(lum))
+    if spread < MIN_SPREAD:
+        return False, (f"the 24 'patches' are all about the same brightness (range {spread:.0f} of 255): "
+                       "no ColorChecker in the frame")
+    corr = float(np.corrcoef(m.ravel(), reference_rgb.ravel())[0, 1])
+    if not corr >= MIN_CORRELATION:
+        return False, f"patch colours do not match a ColorChecker (correlation {corr:.2f}): wrong object, or upside down?"
+    greys = lum[18:24]
+    if not np.all(np.diff(greys) < 0):
+        return False, "the grey ramp is not in order: chart rotated or partly covered?"
+    return True, f"chart plausible (brightness range {spread:.0f}, correlation {corr:.2f})"
+
+
+def validate_fit(error_stats):
+    """Is the fitted correction good enough to use? (ok, reason)."""
+    mean, mx = error_stats["mean"], error_stats["max"]
+    if mean > MAX_MEAN_ERROR or mx > MAX_MAX_ERROR:
+        return False, (f"poor fit (mean error {mean:.0f}, max {mx:.0f} sRGB units): glare on the chart, "
+                       "uneven light, or not a chart")
+    return True, f"mean error {mean:.1f}, max {mx:.1f} (sRGB units)"
